@@ -6,6 +6,109 @@
 <style>:root{color-scheme:light dark}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head>
 <body>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.min.js" integrity="sha384-UagCvVPT5XXA0Hx+nJYUAGBFseHT9zBgpJMSebsAxl9lciTwbT+39j5VfRjdP5Tp" crossorigin="anonymous"></script>
+<script>
+"use strict";
+/* ============================ MFLOnline: ห้องออนไลน์ผ่าน Supabase ============================
+   ตัวเชื่อมระหว่างโค้ดห้องในเกมกับ Supabase (ฐานข้อมูล + Realtime)
+   - อ่านห้อง/แชทและฟังการเปลี่ยนแปลงแบบเรียลไทม์: db.doc(...).get/onSnapshot, db.collection(...).onSnapshot
+   - เขียนผ่านฟังก์ชันฝั่งฐานข้อมูลเท่านั้น (room_*): db.rpc(ชื่อ, อาร์กิวเมนต์)
+   คีย์ด้านล่างเป็น publishable key ที่ออกแบบให้อยู่ในหน้าเว็บได้ — ห้ามใส่ secret/service_role key ที่นี่ */
+window.MFLOnline=(function(){
+  const URL='https://ajogpzqnzufojpsdnyfs.supabase.co';
+  const KEY='sb_publishable_aQQVPksHCH8jF2GrfUC5DQ_rScEJ24y';
+  let client=null, myPresence={}, peersCb=null;
+  const rand=()=>Math.random().toString(36).slice(2,8);
+
+  function sb(){
+    if(client) return client;
+    const lib=window.supabase;
+    if(!lib||!lib.createClient) return null;
+    client=lib.createClient(URL,KEY,{
+      auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false},
+      realtime:{params:{eventsPerSecond:10}}
+    });
+    return client;
+  }
+
+  const toDoc=r=>({code:r.code,name:r.name,pass:r.locked?'locked':'',host:r.host,status:r.status,
+    at:r.at,seats:r.seats||[],state:r.state||null,rev:r.rev,stamp:Date.parse(r.updated_at)||0});
+
+  const db={
+    async rpc(name,args){
+      const {data,error}=await sb().rpc(name,args);
+      if(error) throw error;
+      return data;
+    },
+    doc(path){
+      const code=path.split('/')[1];
+      return {
+        async get(){
+          const {data,error}=await sb().from('rooms').select('*').eq('code',code).maybeSingle();
+          if(error) throw error;
+          return {data:data?toDoc(data):null};
+        },
+        onSnapshot(cb){
+          const c=sb(); let alive=true, last=0;
+          const emit=d=>{ if(!alive) return; if(d.stamp&&d.stamp<last) return; last=Math.max(last,d.stamp||0); cb(d); };
+          const fetchNow=async()=>{
+            const {data,error}=await c.from('rooms').select('*').eq('code',code).maybeSingle();
+            if(!alive||error) return;
+            if(data) emit(toDoc(data)); else cb({gone:true});
+          };
+          const ch=c.channel('room:'+code+':'+rand())
+            .on('postgres_changes',{event:'*',schema:'public',table:'rooms',filter:'code=eq.'+code},p=>{
+              if(!alive) return;
+              if(p.eventType==='DELETE') cb({gone:true}); else emit(toDoc(p.new));
+            })
+            .subscribe(st=>{ if(st==='SUBSCRIBED') fetchNow(); });
+          const pc=c.channel('presence:'+code+':'+rand(),{config:{presence:{key:myPresence.uid||rand()}}});
+          pc.on('presence',{event:'sync'},()=>{
+            if(!alive||!peersCb) return;
+            const seen=pc.presenceState();
+            peersCb(Object.values(seen).map(a=>a[0]).filter(Boolean).map(m=>({uid:m.uid,state:{name:m.name}})));
+          }).subscribe(st=>{ if(st==='SUBSCRIBED') pc.track({uid:myPresence.uid,name:myPresence.name}); });
+          return ()=>{ alive=false; try{ c.removeChannel(ch); c.removeChannel(pc); }catch(e){} };
+        }
+      };
+    },
+    collection(path){
+      const code=path.split('/')[1]; let lim=60;
+      const q={
+        orderBy(){ return q; },
+        limit(n){ lim=n; return q; },
+        onSnapshot(cb){
+          const c=sb(); let alive=true, list=[]; const seen=new Set();
+          const push=rows=>{
+            rows.forEach(r=>{ if(!seen.has(r.id)){ seen.add(r.id); list.push({id:r.id,t:r.t,who:r.who,uid:r.uid,at:r.at}); } });
+            list.sort((a,b)=>a.id-b.id); if(list.length>lim) list=list.slice(-lim);
+            cb(list.slice());
+          };
+          const initial=async()=>{
+            const {data}=await c.from('room_chat').select('*').eq('room_code',code).order('id',{ascending:false}).limit(lim);
+            if(alive&&data) push(data);
+          };
+          const ch=c.channel('chat:'+code+':'+rand())
+            .on('postgres_changes',{event:'INSERT',schema:'public',table:'room_chat',filter:'room_code=eq.'+code},p=>{ if(alive) push([p.new]); })
+            .subscribe(st=>{ if(st==='SUBSCRIBED') initial(); });
+          return ()=>{ alive=false; try{ c.removeChannel(ch); }catch(e){} };
+        }
+      };
+      return q;
+    }
+  };
+
+  const room={
+    presence(state){ myPresence=state||{}; },
+    onPeers(cb){ peersCb=cb; }
+  };
+
+  window.addEventListener('pagehide',()=>{ try{ if(client) client.removeAllChannels(); }catch(e){} });
+
+  return { connect(){ return sb()?{db,room}:null; }, _db:db };
+})();
+
+</script>
 <script>
 window.CAREER_PORTRAITS={"career-1":{"gender":"f","name":"คอนเทนต์ครีเอเตอร์","thumb":"assets/careers-web/01-thumb.webp","src":"assets/careers-web/01-src.webp"},"career-2":{"gender":"f","name":"พนักงานบัญชี","thumb":"assets/careers-web/02-thumb.webp","src":"assets/careers-web/02-src.webp"},"career-3":{"gender":"m","name":"วิศวกร","thumb":"assets/careers-web/03-thumb.webp","src":"assets/careers-web/03-src.webp"},"career-4":{"gender":"f","name":"เจ้าของร้านค้าออนไลน์","thumb":"assets/careers-web/04-thumb.webp","src":"assets/careers-web/04-src.webp"},"career-5":{"gender":"f","name":"ครูโรงเรียนเอกชน","thumb":"assets/careers-web/05-thumb.webp","src":"assets/careers-web/05-src.webp"},"career-6":{"gender":"m","name":"ข้าราชการตำรวจ","thumb":"assets/careers-web/06-thumb.webp","src":"assets/careers-web/06-src.webp"},"career-7":{"gender":"f","name":"พยาบาลรัฐ","thumb":"assets/careers-web/07-thumb.webp","src":"assets/careers-web/07-src.webp"},"career-8":{"gender":"f","name":"พยาบาลเอกชน","thumb":"assets/careers-web/08-thumb.webp","src":"assets/careers-web/08-src.webp"},"career-9":{"gender":"f","name":"แพทย์","thumb":"assets/careers-web/09-thumb.webp","src":"assets/careers-web/09-src.webp"},"career-10":{"gender":"m","name":"เทรดเดอร์","thumb":"assets/careers-web/10-thumb.webp","src":"assets/careers-web/10-src.webp"},"career-11":{"gender":"m","name":"คนขับ Grab","thumb":"assets/careers-web/11-thumb.webp","src":"assets/careers-web/11-src.webp"},"career-12":{"gender":"m","name":"ช่างเทคนิค","thumb":"assets/careers-web/12-thumb.webp","src":"assets/careers-web/12-src.webp"},"career-13":{"gender":"f","name":"สถาปนิก","thumb":"assets/careers-web/13-thumb.webp","src":"assets/careers-web/13-src.webp"},"career-14":{"gender":"m","name":"โปรแกรมเมอร์","thumb":"assets/careers-web/14-thumb.webp","src":"assets/careers-web/14-src.webp"},"career-15":{"gender":"f","name":"แม่ค้าไลฟ์สด","thumb":"assets/careers-web/15-thumb.webp","src":"assets/careers-web/15-src.webp"},"career-16":{"gender":"f","name":"แม่บ้าน–ภารโรง","thumb":"assets/careers-web/16-thumb.webp","src":"assets/careers-web/16-src.webp"},"career-17":{"gender":"m","name":"พนักงานปั๊มน้ำมัน","thumb":"assets/careers-web/17-thumb.webp","src":"assets/careers-web/17-src.webp"},"career-18":{"gender":"m","name":"นักบินผู้ช่วย","thumb":"assets/careers-web/18-thumb.webp","src":"assets/careers-web/18-src.webp"},"career-19":{"gender":"f","name":"ลูกเรือสายการบิน","thumb":"assets/careers-web/19-thumb.webp","src":"assets/careers-web/19-src.webp"},"career-20":{"gender":"m","name":"นายแบบ–นักแสดง","thumb":"assets/careers-web/20-thumb.webp","src":"assets/careers-web/20-src.webp"},"career-21":{"gender":"f","name":"นักศึกษา","thumb":"assets/careers-web/21-thumb.webp","src":"assets/careers-web/21-src.webp"},"career-22":{"gender":"m","name":"อุสตาซ–ครูสอนศาสนา","thumb":"assets/careers-web/22-thumb.webp","src":"assets/careers-web/22-src.webp"},"career-23":{"gender":"m","name":"เจ้าของร้านอาหารฮาลาล","thumb":"assets/careers-web/23-thumb.webp","src":"assets/careers-web/23-src.webp"},"career-24":{"gender":"m","name":"ชาวสวนยาง–ปาล์ม","thumb":"assets/careers-web/24-thumb.webp","src":"assets/careers-web/24-src.webp"},"career-25":{"gender":"f","name":"ผู้ประกอบการแฟชั่นมุสลิม","thumb":"assets/careers-web/25-thumb.webp","src":"assets/careers-web/25-src.webp"},"career-26":{"gender":"m","name":"ไกด์ฮัจย์–อุมเราะฮฺ","thumb":"assets/careers-web/26-thumb.webp","src":"assets/careers-web/26-src.webp"},"career-27":{"gender":"m","name":"ประมงพื้นบ้าน","thumb":"assets/careers-web/27-thumb.webp","src":"assets/careers-web/27-src.webp"},"career-28":{"gender":"f","name":"ช่างตัดเย็บ–ปักผ้าคลุม","thumb":"assets/careers-web/28-thumb.webp","src":"assets/careers-web/28-src.webp"},"career-29":{"gender":"m","name":"พ่อค้าโรตี–ชาชัก","thumb":"assets/careers-web/29-thumb.webp","src":"assets/careers-web/29-src.webp"},"career-30":{"gender":"m","name":"ผู้ส่งออกอาหารฮาลาล","thumb":"assets/careers-web/30-thumb.webp","src":"assets/careers-web/30-src.webp"},"career-31":{"gender":"m","name":"นักกายภาพบำบัด","thumb":"assets/careers-web/31-thumb.webp","src":"assets/careers-web/31-src.webp"},"career-32":{"gender":"f","name":"เภสัชกร","thumb":"assets/careers-web/32-thumb.webp","src":"assets/careers-web/32-src.webp"},"career-33":{"gender":"m","name":"ทันตแพทย์","thumb":"assets/careers-web/33-thumb.webp","src":"assets/careers-web/33-src.webp"},"career-34":{"gender":"f","name":"นักออกแบบกราฟิก","thumb":"assets/careers-web/34-thumb.webp","src":"assets/careers-web/34-src.webp"},"career-35":{"gender":"m","name":"ช่างภาพ","thumb":"assets/careers-web/35-thumb.webp","src":"assets/careers-web/35-src.webp"}};
 </script>
@@ -2936,8 +3039,7 @@ const roomCode=()=>{ const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s='';
 const roomLink=c=>location.href.split('#')[0]+'#room='+c;
 
 async function bootCaps(){
-  try{ if(window.claude && claude.use){ dbNS = await claude.use('db'); } }catch(e){ dbNS=null; }
-  try{ if(window.claude && claude.use){ roomNS = await claude.use('room'); } }catch(e){ roomNS=null; }
+  try{ const c = window.MFLOnline && window.MFLOnline.connect(); if(c){ dbNS=c.db; roomNS=c.room; } }catch(e){ dbNS=null; roomNS=null; }
   if(roomNS){
     try{
       roomNS.presence({uid:myUid, name:(seats[0]&&seats[0].name)||'ผู้เล่น'});
@@ -2945,6 +3047,10 @@ async function bootCaps(){
     }catch(e){}
   }
   paintRoom();
+  if(dbNS && /room=[A-Z0-9]{5}/i.test(location.hash)) window.addEventListener('load',()=>{
+    try{ gotoSetup('online'); }catch(e){}
+    setTimeout(()=>{ try{ if(!roomState && $('#j-code') && $('#j-code').value.length===5) joinRoom(); }catch(e){} },500);
+  });
 }
 
 let roomState=null;
@@ -2953,8 +3059,8 @@ function paintRoom(){
   if(!dbNS){
     host.innerHTML='<div class="card card-p" style="grid-column:1/-1">'+
       '<h3 style="font-size:16px;margin-bottom:8px">โหมดออนไลน์ยังใช้ไม่ได้ในหน้านี้</h3>'+
-      '<p class="muted" style="font-size:13.5px;line-height:1.75">การสร้างห้องข้ามเครื่องต้องเปิดจากลิงก์เกมบน claude.ai โดยตรง '+
-      'ถ้าคุณเปิดไฟล์เกมจากเครื่องตัวเอง ระบบห้องจะไม่ทำงาน — ใช้โหมด “เล่นในเครื่องนี้” ได้ตามปกติ '+
+      '<p class="muted" style="font-size:13.5px;line-height:1.75">การสร้างห้องข้ามเครื่องต้องต่ออินเทอร์เน็ตและเปิดจากเว็บเกม '+
+      'ถ้าคุณเปิดไฟล์เกมจากเครื่องตัวเองหรือออฟไลน์ ระบบห้องจะไม่ทำงาน — ใช้โหมด “เล่นในเครื่องนี้” ได้ตามปกติ '+
       'โดยสลับเป็น “คนจริง” หลายที่นั่งแล้วผลัดกันเล่นบนจอเดียว</p></div>';
     return;
   }
@@ -3034,31 +3140,38 @@ function paintRoom(){
   renderChat('lobbychat');
 }
 
+/* ชื่อที่ใช้ในห้องออนไลน์ — ถ้ายังเป็นชื่อเริ่มต้น "คุณ" จะต่อเลขสุ่มให้ต่างจากเพื่อน */
+const onlineName=fb=>{ const n=((seats[0]&&seats[0].name)||'').trim();
+  return (!n||n==='คุณ') ? (fb==='เจ้าของห้อง'?fb:fb+Math.floor(10+Math.random()*90)) : n; };
 async function createRoom(){
   if(!dbNS) return;
   const name=($('#r-name').value||'').trim() || 'ห้องของ '+(seats[0]?seats[0].name:'ฉัน');
   const pw=($('#r-pass').value||'').trim();
-  const code=roomCode();
-  const doc={ code, name, pass: pw?await sha(pw):'', host:myUid, status:'lobby', at:Date.now(),
-    seats:[{uid:myUid, name:(seats[0]&&seats[0].name)||'เจ้าของห้อง', g:(seats[0]&&seats[0].g)||'m', bot:false, career:null}] };
-  try{ await dbNS.doc('rooms/'+code).set(doc); }catch(e){ return toast('สร้างห้องไม่สำเร็จ'); }
+  const ph=pw?await sha(pw):'';
+  let code=null;
+  for(let i=0;i<6&&!code;i++){
+    const c=roomCode();
+    try{ if(await dbNS.rpc('room_create',{p_code:c, p_name:name, p_pass_hash:ph, p_uid:myUid,
+      p_player_name:onlineName('เจ้าของห้อง'), p_g:(seats[0]&&seats[0].g)||'m'})) code=c; }
+    catch(e){ return toast('สร้างห้องไม่สำเร็จ'); }
+  }
+  if(!code) return toast('สร้างห้องไม่สำเร็จ');
   sfx('good'); watchRoom(code);
 }
 async function joinRoom(){
   if(!dbNS) return;
   const code=($('#j-code').value||'').trim().toUpperCase();
   if(code.length!==5) return toast('รหัสห้องต้องมี 5 ตัว');
-  let d; try{ d=await dbNS.doc('rooms/'+code).get(); }catch(e){}
-  const data = d && (d.data||d);
-  if(!data || !data.code) return toast('ไม่พบห้องนี้');
-  if(data.pass){ const pw=($('#j-pass').value||'').trim();
-    if(await sha(pw)!==data.pass) return toast('รหัสล็อคไม่ถูกต้อง'); }
-  if(data.status==='playing') return toast('ห้องนี้เริ่มเกมไปแล้ว');
-  if(data.seats.length>=6) return toast('ห้องเต็มแล้ว');
-  if(!data.seats.some(s=>s.uid===myUid)){
-    data.seats.push({uid:myUid, name:(seats[0]&&seats[0].name)||'ผู้เล่นใหม่', g:(seats[0]&&seats[0].g)||'m', bot:false, career:null});
-    try{ await dbNS.doc('rooms/'+code).update({seats:data.seats}); }catch(e){ return toast('เข้าห้องไม่สำเร็จ'); }
-  }
+  const pw=($('#j-pass').value||'').trim();
+  let res;
+  try{ res=await dbNS.rpc('room_join',{p_code:code, p_pass_hash:pw?await sha(pw):'', p_uid:myUid,
+    p_player_name:onlineName('ผู้เล่น'), p_g:(seats[0]&&seats[0].g)||'m'}); }
+  catch(e){ return toast('เข้าห้องไม่สำเร็จ'); }
+  if(res==='not_found') return toast('ไม่พบห้องนี้');
+  if(res==='bad_pass') return toast('รหัสล็อคไม่ถูกต้อง');
+  if(res==='playing') return toast('ห้องนี้เริ่มเกมไปแล้ว');
+  if(res==='full') return toast('ห้องเต็มแล้ว');
+  if(res!=='ok') return toast('เข้าห้องไม่สำเร็จ');
   sfx('good'); watchRoom(code);
 }
 function watchRoom(code){
@@ -3066,6 +3179,7 @@ function watchRoom(code){
   if(roomUnsub) try{ roomUnsub(); }catch(e){}
   try{
     roomUnsub = dbNS.doc('rooms/'+code).onSnapshot(d=>{
+      if(d && d.gone){ toast('ห้องนี้ถูกปิดแล้ว'); roomState=null; S.room=null; S.online=false; paintRoom(); return; }
       const data = d && (d.data||d); if(!data||!data.code) return;
       roomState=data;
       if(data.status==='playing' && data.state) onRemoteState(data.state);
@@ -3076,9 +3190,7 @@ function watchRoom(code){
 }
 async function leaveRoom(){
   if(roomState && dbNS){
-    const seatsLeft=roomState.seats.filter(s=>s.uid!==myUid);
-    try{ if(seatsLeft.length) await dbNS.doc('rooms/'+roomState.code).update({seats:seatsLeft});
-         else await dbNS.doc('rooms/'+roomState.code).delete(); }catch(e){}
+    try{ await dbNS.rpc('room_leave',{p_code:roomState.code, p_uid:myUid}); }catch(e){}
   }
   if(roomUnsub) try{ roomUnsub(); }catch(e){}
   if(chatUnsub) try{ chatUnsub(); }catch(e){}
@@ -3096,15 +3208,14 @@ function pickRoomJob(){
       const k=+a.slice(4);
       roomState.seats[idx].career = k<0?null:k;
       seats[0]=saved;
-      try{ dbNS.doc('rooms/'+roomState.code).update({seats:roomState.seats}); }catch(e){}
+      dbNS.rpc('room_set_career',{p_code:roomState.code, p_uid:myUid, p_career:k<0?null:k}).catch(()=>{});
       sfx('tap'); closeSheet(); paintRoom();
     }
   };
 }
 async function addRoomBot(){
   if(roomState.seats.length>=6) return toast('ห้องเต็มแล้ว');
-  roomState.seats.push({uid:'bot'+Date.now(), name:pick(BOTNAMES), g:Math.random()<.5?'m':'f', bot:true, career:null});
-  try{ await dbNS.doc('rooms/'+roomState.code).update({seats:roomState.seats}); }catch(e){}
+  try{ await dbNS.rpc('room_add_bot',{p_code:roomState.code, p_uid:myUid, p_name:pick(BOTNAMES), p_g:Math.random()<.5?'m':'f'}); }catch(e){ toast('เพิ่มบอทไม่สำเร็จ'); }
 }
 
 /* ------- chat ------- */
@@ -3121,7 +3232,7 @@ function watchChat(code){
 async function sendChat(text){
   text=(text||'').trim(); if(!text||!dbNS||!S.room) return;
   const name = (roomState && (roomState.seats.find(s=>s.uid===myUid)||{}).name) || 'ผู้เล่น';
-  try{ await dbNS.doc('rooms/'+S.room+'/chat/'+Date.now()+'-'+myUid).set({t:text, who:name, uid:myUid, at:Date.now()}); sfx('tap'); }catch(e){}
+  try{ await dbNS.rpc('room_send_chat',{p_code:S.room, p_uid:myUid, p_who:name, p_t:text}); sfx('tap'); }catch(e){}
 }
 function renderChat(id){
   const el=document.getElementById(id); if(!el) return;
@@ -3141,7 +3252,7 @@ function syncPush(){
   const writer = (p.isBot && S.isHost) || p.id===S.me;
   if(!writer) return;
   clearTimeout(pushT);
-  pushT=setTimeout(()=>{ try{ dbNS.doc('rooms/'+S.room).update({state:serialize(), status:'playing'}); }catch(e){} }, 240);
+  pushT=setTimeout(()=>{ dbNS.rpc('room_push_state',{p_code:S.room, p_uid:myUid, p_state:serialize()}).catch(()=>{}); }, 240);
 }
 function onRemoteState(st){
   if(roomState){
@@ -3172,7 +3283,7 @@ async function hostStart(){
   S.me = roomState.seats.findIndex(s=>s.uid===myUid);
   startGame();
   $('#chat-card').classList.remove('hide');
-  try{ await dbNS.doc('rooms/'+roomState.code).update({status:'playing', state:serialize()}); }catch(e){}
+  try{ await dbNS.rpc('room_start',{p_code:roomState.code, p_uid:myUid, p_state:serialize()}); }catch(e){}
 }
 </script>
 <script>
@@ -5599,7 +5710,7 @@ window.startGame=function(){const used=[];seats.forEach(s=>{if(s.bot&&BOTNAMES.i
 const identitySeats=renderSeats;
 window.renderSeats=function(){const used=[];seats.forEach(s=>{if(s.bot&&BOTNAMES.includes(s.name)&&!BOT_IDENTITIES[s.g||'m'].includes(s.name))Object.assign(s,botIdentity(s.g,used));used.push(s.name);});return identitySeats.apply(this,arguments);};
 const roomBot=addRoomBot;
-window.addRoomBot=async function(){if(roomState&&roomState.seats.length<6){const ident=botIdentity(null,roomState.seats.map(s=>s.name));roomState.seats.push({uid:'bot'+Date.now(),...ident,bot:true,career:null});try{await dbNS.doc('rooms/'+roomState.code).update({seats:roomState.seats});}catch{toast('เพิ่มบอทไม่สำเร็จ');}}};
+window.addRoomBot=async function(){if(roomState&&roomState.seats.length<6){const ident=botIdentity(null,roomState.seats.map(s=>s.name));try{await dbNS.rpc('room_add_bot',{p_code:roomState.code,p_uid:myUid,p_name:ident.name,p_g:ident.g});}catch{toast('เพิ่มบอทไม่สำเร็จ');}}};
 const baseLabel=syncRollLabel;
 window.syncRollLabel=function(){const p=S.players[S.cur];if(p&&(p.isBot||(S.online&&p.id!==S.me)))return;return baseLabel();};
 const baseDice=showDice;
@@ -7063,6 +7174,7 @@ html[data-theme=dark] #scr-game .card,html[data-theme=dark] #scr-game .boardcard
 /* Firebase lobby foundation only. No board-state serialization or turn sync. */
 (function(){
  'use strict';
+ if(window.supabase) return; /* Supabase online rooms (src/online.js) replace this lobby */
  const Core=MFLLobbyCore,config=window.MFL_LOBBY_CONFIG||{},esc=GameArt.esc;
  let backend=null,current=null,room=null,presence={},busy=false,error='',connection=false;
  const form={name:'',roomName:'Weekend Board Game',joinId:''};
